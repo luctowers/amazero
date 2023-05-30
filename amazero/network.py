@@ -2,6 +2,31 @@ import torch
 import torch.nn as nn
 
 
+class AmazonsNetwork(nn.Module):
+    def __init__(
+        self,
+        residual_channels: int,
+        residual_layers: int,
+        board_shape: tuple[int, int]
+    ):
+        super().__init__()
+        self.board_shape = board_shape
+        in_channels = 4
+        board_size = board_shape[0] * board_shape[1]
+        policy_size = 3 * board_size
+        self.conv_input = ConvolutionBlock(in_channels, residual_channels, conv3x3)
+        self.res_tower = ResidualTower(residual_channels, residual_layers)
+        self.head = Head(residual_channels, board_size, policy_size)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        out = self.conv_input(x)
+        out = self.res_tower(out)
+        pol, val = self.head(out)
+        pol = pol.reshape((batch_size, 3) + self.board_shape)
+        return pol, val
+
+
 class MultistageResidualNetwork(nn.Module):
     def __init__(
             self,
@@ -44,18 +69,19 @@ class ResidualNetwork(nn.Module):
         in_channels: int,
         residual_channels: int,
         residual_layers: int,
-        out_size: int
+        input_size: int,
+        policy_size: int
     ):
         super().__init__()
         self.conv_input = ConvolutionBlock(in_channels, residual_channels, conv3x3)
         self.res_tower = ResidualTower(residual_channels, residual_layers)
-        self.head = Head(out_size, residual_channels)
+        self.head = Head(residual_channels, input_size, policy_size)
 
     def forward(self, x):
-        convout = self.conv_input(x)
-        towerout = self.res_tower(convout)
-        pol, val = self.head(towerout)
-        return pol, val, towerout
+        out = self.conv_input(x)
+        out = self.res_tower(out)
+        out = self.head(out)
+        return out
 
 
 class ResidualTower(nn.Sequential):
@@ -67,10 +93,10 @@ class ResidualTower(nn.Sequential):
 
 
 class Head(nn.Module):
-    def __init__(self, out_size: int, residual_channels: int):
+    def __init__(self, residual_channels: int, input_size: int, policy_size: int):
         super().__init__()
-        self.policy_head = PolicyHead(out_size, residual_channels)
-        self.value_head = ValueHead(out_size, residual_channels)
+        self.policy_head = PolicyHead(residual_channels, input_size, policy_size)
+        self.value_head = ValueHead(residual_channels, input_size)
 
     def forward(self, x):
         pol = self.policy_head(x)
@@ -79,10 +105,10 @@ class Head(nn.Module):
 
 
 class PolicyHead(nn.Module):
-    def __init__(self, out_size: int, residual_channels: int):
+    def __init__(self, residual_channels: int, input_size: int, out_size: int):
         super().__init__()
-        self.policy_conv = ConvolutionBlock(residual_channels, 2, conv1x1)
-        self.policy_fc = nn.Linear(2 * out_size, out_size)
+        self.policy_conv = ConvolutionBlock(residual_channels, 6, conv1x1)
+        self.policy_fc = nn.Linear(6 * input_size, out_size)
 
     def forward(self, x):
         out = self.policy_conv(x)
@@ -91,10 +117,10 @@ class PolicyHead(nn.Module):
 
 
 class ValueHead(nn.Module):
-    def __init__(self, out_size: int, residual_channels: int):
+    def __init__(self, residual_channels: int, input_size: int):
         super().__init__()
         self.value_conv = ConvolutionBlock(residual_channels, 1, conv1x1)
-        self.value_fc_1 = nn.Linear(out_size, 256)
+        self.value_fc_1 = nn.Linear(input_size, 256)
         self.value_fc_2 = nn.Linear(256, 1)
         self.relu = nn.ReLU(inplace=True)
 
@@ -143,55 +169,55 @@ def conv1x1(in_channels: int, out_channels: int):
 def conv3x3(in_channels: int, out_channels: int):
     return nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
 
-device = torch.device("cuda")
+device = torch.device("mps")
 
-BATCH = 4096
+BATCH = 64
 BOARD_DIM = 10
 
-model = MultistageResidualNetwork(
-    in_channels=(4, 6, 6),
-    in_channel_indices=(
-        # -- stage 0
-        # 0 = friendly amazons
-        # 1 = enemy amazons
-        # 2 = arrows
-        # 3 = empty spaces
-        # -- stage 1
-        # 4 = unselected friendly amazons
-        # 5 = selected friendly amazon
-        # 6 = selected friendly amazon legal moves
-        # -- stage 2
-        # 7 = friendly amazon selected move
-        # 8 = friendly amazons post move
-        # 9 = empty spaces post move
-        # 10 = legal arrows moves
-        torch.IntTensor([0, 1, 2, 3]).to(device),
-        torch.IntTensor([1, 2, 3, 4, 5, 6]).to(device),
-        torch.IntTensor([1, 2, 7, 8, 9, 10]).to(device),
-    ),
+# model = MultistageResidualNetwork(
+#     in_channels=(4, 6, 6),
+#     in_channel_indices=(
+#         # -- stage 0
+#         # 0 = friendly amazons
+#         # 1 = enemy amazons
+#         # 2 = arrows
+#         # 3 = empty spaces
+#         # -- stage 1
+#         # 4 = unselected friendly amazons
+#         # 5 = selected friendly amazon
+#         # 6 = selected friendly amazon legal moves
+#         # -- stage 2
+#         # 7 = friendly amazon selected move
+#         # 8 = friendly amazons post move
+#         # 9 = empty spaces post move
+#         # 10 = legal arrows moves
+#         torch.IntTensor([0, 1, 2, 3]).to(device),
+#         torch.IntTensor([1, 2, 3, 4, 5, 6]).to(device),
+#         torch.IntTensor([1, 2, 7, 8, 9, 10]).to(device),
+#     ),
+#     residual_channels=256,
+#     residual_layers=(12, 4, 4),
+#     out_size=BOARD_DIM*BOARD_DIM
+# ).to(device)
+
+model = AmazonsNetwork(
     residual_channels=256,
-    residual_layers=(12, 4, 4),
-    out_size=BOARD_DIM*BOARD_DIM
+    residual_layers=20,
+    board_shape=(BOARD_DIM, BOARD_DIM)
 ).to(device)
 
-test_batch = [
-    torch.randint(0, 2, (BATCH, 4, BOARD_DIM, BOARD_DIM), dtype=torch.float).to(device),
-    torch.randint(0, 2, (BATCH, 7, BOARD_DIM, BOARD_DIM), dtype=torch.float).to(device),
-    torch.randint(0, 2, (BATCH, 11, BOARD_DIM, BOARD_DIM), dtype=torch.float).to(device),
-]
+test_batch = torch.randint(0, 2, (BATCH, 4, BOARD_DIM, BOARD_DIM), dtype=torch.float).to(device)
 
 import time
 N = 8
 t1 = time.time()
 results = []
 for i in range(N):
-    with torch.autocast(device_type='cuda', dtype=torch.float16):
-        with torch.no_grad():
-            out = model(test_batch)
-    for pol, val in out:
-        results.append(pol.to("cpu"))
-        results.append(val.to("cpu"))
-torch.cuda.synchronize(device)
+    with torch.no_grad():
+        pol, val = model(test_batch)
+    print(pol.shape)
+    results.append(pol.to("cpu"))
+    results.append(val.to("cpu"))
+# torch.cuda.synchronize(device)
 t2 = time.time()
-print((t2-t1)/N/BATCH)
-print(3*N*BATCH/(t2-t1))
+print((t2-t1)/N)
